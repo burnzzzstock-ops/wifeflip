@@ -1,0 +1,10 @@
+{
+  "name": "flipping-friend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Phone app to track thrift flips and spot gems while sourcing.",
+  "dependencies": {
+    "@anthropic-ai/sdk": "latest"
+  }
+}
