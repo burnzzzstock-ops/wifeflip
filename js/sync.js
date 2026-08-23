@@ -1,33 +1,26 @@
 // Shared cloud sync via Supabase. Local IndexedDB stays the instant source of
 // truth on each device; changes flow to a shared cloud table and back.
 //
-// Design: per-record last-write-wins by `updatedAt`. Local edits go into an
-// outbox and upload when online; incoming changes are applied with the remote
-// timestamp. Items and expenses share one cloud table — expense records carry
-// doc:"expense" and an "exp-" id prefix, and pull() routes them to the right
-// local store. Works offline — sync resumes when signal returns.
-//
-// Reliability: sync runs automatically when the app becomes visible again
-// (installed PWAs resume from memory and can otherwise go days without a
-// launch-time sync), every 60s while open and signed in, and on reconnect.
-// Status is observable so the UI can show synced / pending / error instead of
-// failing silently.
+// This standalone wife build is pre-wired to the existing legacy Flipping Friend
+// Supabase project using its browser-safe publishable key. The user's password is
+// never embedded here. Local IndexedDB remains the instant source of truth.
 
 import * as db from "./db.js";
 
 const CDN = "https://esm.sh/@supabase/supabase-js@2";
 const TABLE = "items";
 const AUTO_SYNC_MS = 60 * 1000;
+const DEFAULT_SUPABASE_URL = "https://phwgtbflswzinwzdgjwk.supabase.co";
+const DEFAULT_SUPABASE_KEY = "sb_publishable_1P1ht27bgTELwiqL2vZAIg_d6_e8Pv_";
 
 let client = null;
 let createClientFn = null;
 let syncing = false;
 
-// ---- Observable status ----
 const status = {
-  state: "off",      // off | signedout | ok | syncing | error | offline
-  pending: 0,        // outbox entries waiting to upload
-  lastSyncAt: null,  // ms timestamp of last successful full sync
+  state: "off",
+  pending: 0,
+  lastSyncAt: null,
   lastError: null,
 };
 const listeners = new Set();
@@ -54,7 +47,10 @@ async function loadLib() {
 
 export async function getConfig() {
   const s = await db.getSettings();
-  return { url: s.supabaseUrl || "", key: s.supabaseKey || "" };
+  return {
+    url: s.supabaseUrl || DEFAULT_SUPABASE_URL,
+    key: s.supabaseKey || DEFAULT_SUPABASE_KEY,
+  };
 }
 
 export async function isConfigured() {
@@ -65,7 +61,7 @@ export async function isConfigured() {
 export async function saveConfig(url, key) {
   await db.setSetting("supabaseUrl", url.trim());
   await db.setSetting("supabaseKey", key.trim());
-  client = null; // force re-init with new creds
+  client = null;
   await refreshStatus({ state: (url && key) ? "signedout" : "off", lastError: null });
 }
 
@@ -94,7 +90,7 @@ export async function signIn(email, password) {
   const c = await getClient();
   const { error } = await c.auth.signInWithPassword({ email, password });
   if (error) throw new Error(error.message);
-  await db.setSetting("syncEmail", email); // prefill future sign-ins on this device
+  await db.setSetting("syncEmail", email);
   await refreshStatus({ state: "ok", lastError: null });
 }
 
@@ -106,8 +102,6 @@ export async function signOut() {
   await refreshStatus({ state: "signedout" });
 }
 
-// Record a local change for upload. Call after a successful local save/delete.
-// Works for items and expenses alike (expense objects carry doc:"expense").
 export async function onLocalChange(op, idOrRecord) {
   if (op === "upsert") {
     await db.outboxAdd("upsert", idOrRecord.id, idOrRecord);
@@ -120,7 +114,6 @@ export async function onLocalChange(op, idOrRecord) {
   }
 }
 
-// Upload everything currently in the local DB (used on first enable).
 export async function seedOutboxFromLocal() {
   const items = await db.getAllItems();
   for (const it of items) await db.outboxAdd("upsert", it.id, it);
@@ -129,15 +122,6 @@ export async function seedOutboxFromLocal() {
   await refreshStatus();
 }
 
-// Push pending outbox entries to the cloud.
-//
-// The cloud `updated_at` column is the PULL WATERMARK — it must reflect when a
-// row LANDED in the cloud, not when the record was last edited. (It used to be
-// the edit time; a device that had synced recently would then skip older-edited
-// records uploaded later by the other device — the "two phones show different
-// item counts" bug.) Stamps are forced above our last-seen cloud watermark so
-// clock skew can't hide an upload either. Conflict resolution ("which edit
-// wins") uses the record's own updatedAt inside `data`, in pull().
 export async function flush() {
   const c = await getClient();
   const pending = await db.outboxAll();
@@ -165,8 +149,6 @@ function isExpenseRow(row) {
   return (row.data && row.data.doc === "expense") || String(row.id).startsWith("exp-");
 }
 
-// Pull changes newer than our last sync and apply them locally.
-// Returns the number of records changed locally.
 export async function pull() {
   const c = await getClient();
   const s = await db.getSettings();
@@ -201,17 +183,12 @@ export async function pull() {
   return changed;
 }
 
-// Full re-sync from scratch: re-upload everything on this device and re-pull
-// everything from the cloud, merging by each record's own edit time. Heals any
-// divergence between devices — including rows missed by the old edit-time
-// watermark bug. Safe: never deletes anything on its own.
 export async function repairSync() {
   await db.setSetting("syncLastTs", 0);
   await seedOutboxFromLocal();
   return fullSync();
 }
 
-// Full sync: push local changes, then pull remote ones.
 export async function fullSync() {
   if (syncing) return { skipped: true };
   syncing = true;
@@ -229,9 +206,6 @@ export async function fullSync() {
   }
 }
 
-// ---- Automatic background sync ----
-// onChanged(changedCount) fires after any auto-sync that pulled new data,
-// so the UI can re-render with fresh records.
 let autoStarted = false;
 export async function startAutoSync(onChanged) {
   if (autoStarted) return;
@@ -245,7 +219,7 @@ export async function startAutoSync(onChanged) {
       if (!(await ready())) { await refreshStatus(); return; }
       const { changed } = await fullSync();
       if (changed && onChanged) onChanged(changed);
-    } catch (_) { /* status already reflects the error */ }
+    } catch (_) {}
   };
 
   window.addEventListener("online", run);
@@ -257,7 +231,6 @@ export async function startAutoSync(onChanged) {
     if (document.visibilityState === "visible") run();
   }, AUTO_SYNC_MS);
 
-  // Initial state for the status chip, then a first sync.
   if (await isConfigured()) {
     await refreshStatus({ state: (await currentUser()) ? "ok" : "signedout" });
   } else {
