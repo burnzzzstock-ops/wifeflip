@@ -1,12 +1,13 @@
 // Offline-first service worker. Caches the app shell so Flipping Friend opens
 // instantly and works with no signal (your data lives in IndexedDB, not here).
 
-const CACHE = "flipping-friend-v9";
+const CACHE = "flipping-friend-v10";
 const ASSETS = [
   "./",
   "./index.html",
   "./css/styles.css",
   "./js/app.js",
+  "./js/migration.js",
   "./js/db.js",
   "./js/util.js",
   "./js/barcode.js",
